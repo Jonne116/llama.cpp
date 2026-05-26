@@ -573,6 +573,17 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
         if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED && src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED) {
             return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, 1};
         }
+        // A mirrored, B split on a pass-through dim (dims >= 2 of B are carried to the
+        // output unchanged).  This covers the rotation matmul where activations are
+        // reshaped to preserve the head axis and the head dim ends up as dim 2 or 3
+        // of the 4D input.
+        if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED &&
+            (src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_2 ||
+             src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_3)) {
+            ggml_backend_meta_split_state ret = src_ss[1];
+            ret.n_segments = 1;
+            return ret;
+        }
         if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_1 && src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED) {
             ggml_backend_meta_split_state ret = src_ss[0];
             ret.axis = GGML_BACKEND_SPLIT_AXIS_0;
