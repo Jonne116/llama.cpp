@@ -871,17 +871,24 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
         if (ggml_backend_buffer_get_usage(tensor->buffer) != GGML_BACKEND_BUFFER_USAGE_COMPUTE && tensor->view_src == nullptr) {
             ggml_backend_dev_t dev = ggml_backend_buft_get_device(ggml_backend_buffer_get_type(tensor->buffer));
             const ggml_backend_meta_device_context * dev_ctx = (const ggml_backend_meta_device_context *) dev->context;
-            ggml_backend_meta_split_state ret = dev_ctx->get_split_state(tensor, dev_ctx->get_split_state_ud);
-            if (ret.axis >= 0 && ret.axis <= GGML_MAX_DIMS) {
-                const int64_t granularity = ret.axis == GGML_BACKEND_SPLIT_AXIS_0 ? ggml_blck_size(tensor->type) : 1;
-                int64_t ne_sum = 0;
-                for (size_t sj = 0; sj < ret.n_segments*n_bufs; sj++) {
-                    GGML_ASSERT(ret.ne[sj] % granularity == 0);
-                    ne_sum += ret.ne[sj];
+            if (dev_ctx && dev_ctx->get_split_state) {
+                ggml_backend_meta_split_state ret = dev_ctx->get_split_state(tensor, dev_ctx->get_split_state_ud);
+                if (ret.axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
+                    // Device context couldn't determine split state for this leaf tensor.
+                    // Fall through to source-based calculation (will likely be MIRRORED).
+                } else {
+                    if (ret.axis >= 0 && ret.axis <= GGML_MAX_DIMS) {
+                        const int64_t granularity = ret.axis == GGML_BACKEND_SPLIT_AXIS_0 ? ggml_blck_size(tensor->type) : 1;
+                        int64_t ne_sum = 0;
+                        for (size_t sj = 0; sj < ret.n_segments*n_bufs; sj++) {
+                            GGML_ASSERT(ret.ne[sj] % granularity == 0);
+                            ne_sum += ret.ne[sj];
+                        }
+                        GGML_ASSERT(ne_sum == tensor->ne[ret.axis]);
+                    }
+                    return ret;
                 }
-                GGML_ASSERT(ne_sum == tensor->ne[ret.axis]);
             }
-            return ret;
         }
 
         std::vector<ggml_backend_meta_split_state> src_ss(GGML_MAX_SRC, {GGML_BACKEND_SPLIT_AXIS_NONE, {0}, 1});
