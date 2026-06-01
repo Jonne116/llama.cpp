@@ -851,6 +851,13 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
     };
 
     auto handle_flash_attn_ext = [&](const std::vector<ggml_backend_meta_split_state> & src_ss) -> ggml_backend_meta_split_state {
+        // If any source is MIRRORED (from fallback), the output is also MIRRORED.
+        // This handles the case where split state inference failed for upstream tensors.
+        if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED ||
+            src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED ||
+            src_ss[2].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED) {
+            return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, 1};
+        }
         GGML_ASSERT(                             src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_2);
         GGML_ASSERT(                             src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_2);
         GGML_ASSERT(                             src_ss[2].axis == GGML_BACKEND_SPLIT_AXIS_2);
