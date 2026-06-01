@@ -980,6 +980,17 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
         }
 
         ggml_backend_meta_split_state split_state;
+        // Debug: log source split states for MUL_MAT to diagnose UNKNOWN results
+        if (tensor->op == GGML_OP_MUL_MAT) {
+            std::string src_info;
+            for (size_t i = 0; i < GGML_MAX_SRC; i++) {
+                if (tensor->src[i]) {
+                    if (!src_info.empty()) src_info += ", ";
+                    src_info += std::to_string(i) + "=" + std::string(tensor->src[i]->name) + "(" + ggml_backend_meta_split_axis_name(src_ss[i].axis) + ")";
+                }
+            }
+            GGML_LOG_ERROR("%s: MUL_MAT %s sources=[%s]\n", __func__, tensor->name, src_info.c_str());
+        }
         switch (tensor->op) {
             case GGML_OP_NONE: {
                 // Leaf tensor with no split state provider (should not reach here normally,
@@ -1039,13 +1050,11 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             case GGML_OP_MUL_MAT:
             case GGML_OP_MUL_MAT_ID: {
                 split_state = handle_mul_mat(src_ss);
-                if (split_state.axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN || src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN || src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
-                    fprintf(stderr, "E MUL_MAT %s: src0=%s(%s) src1=%s(%s) -> %s\n",
-                        tensor->name,
-                        tensor->src[0]?tensor->src[0]->name:"null", ggml_backend_meta_split_axis_name(src_ss[0].axis),
-                        tensor->src[1]?tensor->src[1]->name:"null", ggml_backend_meta_split_axis_name(src_ss[1].axis),
-                        ggml_backend_meta_split_axis_name(split_state.axis));
-                }
+                fprintf(stderr, "E MUL_MAT %s: src0=%s(%s) src1=%s(%s) -> %s\n",
+                    tensor->name,
+                    tensor->src[0]?tensor->src[0]->name:"null", ggml_backend_meta_split_axis_name(src_ss[0].axis),
+                    tensor->src[1]?tensor->src[1]->name:"null", ggml_backend_meta_split_axis_name(src_ss[1].axis),
+                    ggml_backend_meta_split_axis_name(split_state.axis));
             } break;
             case GGML_OP_OUT_PROD: {
                 split_state = handle_generic(src_ss, /*scalar_only =*/ true);
