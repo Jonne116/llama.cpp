@@ -534,15 +534,7 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             ret = {GGML_BACKEND_SPLIT_AXIS_UNKNOWN, {0}, 1};
         }
         if (ret.axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
-            std::string srcs;
-            for (size_t i = 0; i < GGML_MAX_SRC; i++) {
-                if (tensor->src[i] && tensor->src[i] != tensor) {
-                    if (!srcs.empty()) srcs += ", ";
-                    srcs += std::string(tensor->src[i]->name) + "[" + ggml_op_name(tensor->src[i]->op) + "](" + ggml_backend_meta_split_axis_name(src_ss[i].axis) + ")";
-                }
-            }
-            GGML_LOG_WARN("%s: handle_generic(%s, scalar_only=%d) UNKNOWN for %s[%s], sources=[%s] (will fallback to MIRRORED)\n",
-                __func__, ggml_op_name(tensor->op), scalar_only, tensor->name, ggml_op_name(tensor->op), srcs.c_str());
+            // Silently return UNKNOWN - top-level fallback will replace with MIRRORED.
         }
         // Don't crash - let the top-level fallback replace UNKNOWN with MIRRORED.
         // GGML_ASSERT(ret.axis != GGML_BACKEND_SPLIT_AXIS_UNKNOWN);
@@ -560,8 +552,6 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
         // features and can't compute the correct per-row result. Fallback to
         // MIRRORED to avoid crashing (correctness requires allreduce).
         if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_0) {
-            GGML_LOG_WARN("%s: per-row op %s[%s] has AXIS_0 split input, returning MIRRORED\n",
-                __func__, tensor->name, ggml_op_name(tensor->op));
             return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, 1};
         }
         GGML_ASSERT(src_ss[0].axis != GGML_BACKEND_SPLIT_AXIS_0);
@@ -930,11 +920,7 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             if (dev_ctx && dev_ctx->get_split_state) {
                 ggml_backend_meta_split_state ret = dev_ctx->get_split_state(tensor, dev_ctx->get_split_state_ud);
                 if (ret.axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
-                    GGML_LOG_WARN("%s: device_context returned UNKNOWN for leaf %s[%s], defaulting to MIRRORED\n",
-                        __func__, tensor->name, ggml_op_name(tensor->op));
                     // Fallback: leaf tensors with unrecognized split state default to MIRRORED.
-                    // This covers runtime tensors (e.g., MTP state, sampling intermediates)
-                    // that are not model weights and have no split-axis configuration.
                     return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, 1};
                 }
                 if (ret.axis >= 0 && ret.axis <= GGML_MAX_DIMS) {
@@ -948,8 +934,6 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
                 }
                 return ret;
             } else {
-                GGML_LOG_WARN("%s: no device_context for leaf %s[%s], defaulting to MIRRORED\n",
-                    __func__, tensor->name, ggml_op_name(tensor->op));
                 // Fallback: no split state provider → assume MIRRORED.
                 return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, 1};
             }
@@ -962,21 +946,8 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
                 continue;
             }
             src_ss[i] = ggml_backend_meta_get_split_state(stc, tensor->src[i], /*assume_sync =*/ true);
-            if (src_ss[i].axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
-                GGML_LOG_ERROR("UNKNOWN split state: src[%zu] %s[%s] -> tensor %s[%s]. Other srcs: ",
-                    i, tensor->src[i]->name, ggml_op_name(tensor->src[i]->op),
-                    tensor->name, ggml_op_name(tensor->op));
-                for (size_t j = 0; j < GGML_MAX_SRC; j++) {
-                    if (tensor->src[j] && tensor->src[j] != tensor && j != i) {
-                        ggml_backend_meta_split_state ss = ggml_backend_meta_get_split_state(stc, tensor->src[j], true);
-                        GGML_LOG_ERROR("%s[%s](%s) ", tensor->src[j]->name, ggml_op_name(tensor->src[j]->op), ggml_backend_meta_split_axis_name(ss.axis));
-                    }
-                }
-                GGML_LOG_ERROR("\n");
-            }
             // Don't crash here - let the UNKNOWN propagate to the handler.
             // The top-level fallback will replace UNKNOWN with MIRRORED.
-            // GGML_ASSERT(src_ss[i].axis != GGML_BACKEND_SPLIT_AXIS_UNKNOWN);
         }
 
         ggml_backend_meta_split_state split_state;
@@ -1241,8 +1212,6 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
     if (it == buf_ctx->split_state_cache.end()) {
         ggml_backend_meta_split_state ss = calculate_split_state();
         if (ss.axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
-            GGML_LOG_WARN("%s: calculate_split_state returned UNKNOWN for %s[%s], defaulting to MIRRORED\n",
-                __func__, tensor->name, ggml_op_name(tensor->op));
             ss = {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, 1};
         }
         buf_ctx->split_state_cache[key].first = ss;
