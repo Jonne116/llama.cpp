@@ -472,13 +472,18 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
         }
 
         // output
+        // Keep output.weight MIRRORED (not split on vocab) so that the logits
+        // are not split on the vocab dimension. This allows backend sampling
+        // (argmax, top_k, softmax, etc.) to operate on the full vocabulary on
+        // each GPU independently.
         if (std::regex_match(tensor_name, pattern_output_weight)) {
-            return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_1);
+            return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_MIRRORED);
         }
         if (std::regex_match(tensor_name, pattern_output_bias)) {
-            const ggml_tensor * output_weight = ud->model->get_tensor("output.weight");
-            GGML_ASSERT(output_weight != nullptr);
-            return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_0);
+            // Mirrored to match output.weight which is now MIRRORED.
+            // The logits are split on axis 1 (batch), so the bias must
+            // be MIRRORED for the add(logits, bias) to be well-defined.
+            return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_MIRRORED);
         }
 
         // everything else

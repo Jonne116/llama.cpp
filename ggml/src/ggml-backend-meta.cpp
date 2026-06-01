@@ -628,6 +628,13 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             case GGML_BACKEND_SPLIT_AXIS_3: {
                 GGML_ASSERT(!ggml_is_permuted(tensor) && !ggml_is_permuted(tensor->src[0]));
                 if (src_ss[0].axis == ggml_n_dims(tensor->src[0]) - 1) {
+                    // If the output has fewer dimensions, the split axis was
+                    // collapsed (e.g., a view selecting a single row from a
+                    // batch-split tensor). Each device has the full data for
+                    // its selected element → MIRRORED.
+                    if (ggml_n_dims(tensor) < ggml_n_dims(tensor->src[0])) {
+                        return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, 1};
+                    }
                     return {ggml_backend_meta_split_axis(ggml_n_dims(tensor) - 1), {0}, 1};
                 }
                 std::vector<int64_t> base_ne_in;
