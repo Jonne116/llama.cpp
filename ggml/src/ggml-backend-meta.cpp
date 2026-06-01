@@ -555,6 +555,15 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
         if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
             return src_ss[0];
         }
+        // Per-row ops (RMS_NORM, ARGMAX, etc.) operate along axis 0.
+        // If the data is split on axis 0, each GPU only has a portion of the
+        // features and can't compute the correct per-row result. Fallback to
+        // MIRRORED to avoid crashing (correctness requires allreduce).
+        if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_0) {
+            GGML_LOG_WARN("%s: per-row op %s[%s] has AXIS_0 split input, returning MIRRORED\n",
+                __func__, tensor->name, ggml_op_name(tensor->op));
+            return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, 1};
+        }
         GGML_ASSERT(src_ss[0].axis != GGML_BACKEND_SPLIT_AXIS_0);
         return src_ss[0];
     };
