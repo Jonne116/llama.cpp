@@ -951,11 +951,12 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             case GGML_OP_MUL_MAT:
             case GGML_OP_MUL_MAT_ID: {
                 split_state = handle_mul_mat(src_ss);
-                if (split_state.axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
-                    fprintf(stderr, "E MUL_MAT %s UNKNOWN: src0=%s(%s) src1=%s(%s)\n",
+                if (split_state.axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN || src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN || src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
+                    fprintf(stderr, "E MUL_MAT %s: src0=%s(%s) src1=%s(%s) -> %s\n",
                         tensor->name,
                         tensor->src[0]?tensor->src[0]->name:"null", ggml_backend_meta_split_axis_name(src_ss[0].axis),
-                        tensor->src[1]?tensor->src[1]->name:"null", ggml_backend_meta_split_axis_name(src_ss[1].axis));
+                        tensor->src[1]?tensor->src[1]->name:"null", ggml_backend_meta_split_axis_name(src_ss[1].axis),
+                        ggml_backend_meta_split_axis_name(split_state.axis));
                 }
             } break;
             case GGML_OP_OUT_PROD: {
@@ -1141,7 +1142,11 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
     }
 
     if (it == buf_ctx->split_state_cache.end()) {
-        buf_ctx->split_state_cache[key].first = calculate_split_state();
+        ggml_backend_meta_split_state ss = calculate_split_state();
+        if (ss.axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
+            fprintf(stderr, "E calculate_split_state returned UNKNOWN for %s[%s]\n", tensor->name, ggml_op_name(tensor->op));
+        }
+        buf_ctx->split_state_cache[key].first = ss;
         memcpy(buf_ctx->split_state_cache[key].second, tensor, sizeof(buf_ctx->split_state_cache[key].second));
         if (buf_ctx->debug > 0) {
             std::string srcs_info;
