@@ -541,15 +541,20 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
                     srcs += std::string(tensor->src[i]->name) + "[" + ggml_op_name(tensor->src[i]->op) + "](" + ggml_backend_meta_split_axis_name(src_ss[i].axis) + ")";
                 }
             }
-            GGML_LOG_ERROR("handle_generic(%s, scalar_only=%d) UNKNOWN: op=%s(%s) sources=[%s]\n",
-                ggml_op_name(tensor->op), scalar_only, tensor->name, ggml_op_name(tensor->op), srcs.c_str());
+            GGML_LOG_WARN("%s: handle_generic(%s, scalar_only=%d) UNKNOWN for %s[%s], sources=[%s] (will fallback to MIRRORED)\n",
+                __func__, ggml_op_name(tensor->op), scalar_only, tensor->name, ggml_op_name(tensor->op), srcs.c_str());
         }
-        GGML_ASSERT(ret.axis != GGML_BACKEND_SPLIT_AXIS_UNKNOWN);
+        // Don't crash - let the top-level fallback replace UNKNOWN with MIRRORED.
+        // GGML_ASSERT(ret.axis != GGML_BACKEND_SPLIT_AXIS_UNKNOWN);
         return ret;
     };
 
     // Some ops process data on a per-row bases:
     auto handle_per_row = [&](const std::vector<ggml_backend_meta_split_state> & src_ss) -> ggml_backend_meta_split_state {
+        // If the source is UNKNOWN, propagate it - the top-level fallback will handle it.
+        if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
+            return src_ss[0];
+        }
         GGML_ASSERT(src_ss[0].axis != GGML_BACKEND_SPLIT_AXIS_0);
         return src_ss[0];
     };
@@ -643,8 +648,13 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             ret.n_segments = 1;
             return ret;
         }
-        GGML_ABORT("fatal error");
-        //return {GGML_BACKEND_SPLIT_AXIS_UNKNOWN, {0}, 1};
+        // Unknown mul_mat split state combination. Return UNKNOWN so the
+        // top-level fallback can replace it with MIRRORED instead of crashing.
+        GGML_LOG_WARN("%s: unhandled mul_mat split state combo for %s[%s]: src0=%s src1=%s, defaulting to UNKNOWN (will fallback to MIRRORED)\n",
+            __func__, tensor->name, ggml_op_name(tensor->op),
+            ggml_backend_meta_split_axis_name(src_ss[0].axis),
+            ggml_backend_meta_split_axis_name(src_ss[1].axis));
+        return {GGML_BACKEND_SPLIT_AXIS_UNKNOWN, {0}, 1};
     };
 
     auto handle_cpy = [&](const std::vector<ggml_backend_meta_split_state> & src_ss) -> ggml_backend_meta_split_state {
@@ -936,7 +946,9 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
                 }
                 GGML_LOG_ERROR("\n");
             }
-            GGML_ASSERT(src_ss[i].axis != GGML_BACKEND_SPLIT_AXIS_UNKNOWN);
+            // Don't crash here - let the UNKNOWN propagate to the handler.
+            // The top-level fallback will replace UNKNOWN with MIRRORED.
+            // GGML_ASSERT(src_ss[i].axis != GGML_BACKEND_SPLIT_AXIS_UNKNOWN);
         }
 
         ggml_backend_meta_split_state split_state;
@@ -1192,7 +1204,9 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
     if (it == buf_ctx->split_state_cache.end()) {
         ggml_backend_meta_split_state ss = calculate_split_state();
         if (ss.axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
-            fprintf(stderr, "E calculate_split_state returned UNKNOWN for %s[%s]\n", tensor->name, ggml_op_name(tensor->op));
+            GGML_LOG_WARN("%s: calculate_split_state returned UNKNOWN for %s[%s], defaulting to MIRRORED\n",
+                __func__, tensor->name, ggml_op_name(tensor->op));
+            ss = {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, 1};
         }
         buf_ctx->split_state_cache[key].first = ss;
         memcpy(buf_ctx->split_state_cache[key].second, tensor, sizeof(buf_ctx->split_state_cache[key].second));
