@@ -530,12 +530,11 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             ret = {GGML_BACKEND_SPLIT_AXIS_UNKNOWN, {0}, 1};
         }
         if (ret.axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
-            const char * an[] = {"NONE","AXIS_0","AXIS_1","AXIS_2","AXIS_3","MIRRORED","PARTIAL","UNKNOWN"};
             std::string srcs;
             for (size_t i = 0; i < GGML_MAX_SRC; i++) {
                 if (tensor->src[i] && tensor->src[i] != tensor) {
                     if (!srcs.empty()) srcs += ", ";
-                    srcs += std::string(tensor->src[i]->name) + "(" + an[src_ss[i].axis] + ")";
+                    srcs += std::string(tensor->src[i]->name) + "[" + ggml_op_name(tensor->src[i]->op) + "](" + ggml_backend_meta_split_axis_name(src_ss[i].axis) + ")";
                 }
             }
             GGML_LOG_ERROR("handle_generic(%s, scalar_only=%d) UNKNOWN: op=%s(%s) sources=[%s]\n",
@@ -865,14 +864,13 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             }
             src_ss[i] = ggml_backend_meta_get_split_state(stc, tensor->src[i], /*assume_sync =*/ true);
             if (src_ss[i].axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
-                const char * axis_names[] = {"NONE","AXIS_0","AXIS_1","AXIS_2","AXIS_3","MIRRORED","PARTIAL","UNKNOWN"};
                 GGML_LOG_ERROR("UNKNOWN split state: src[%zu] %s[%s] -> tensor %s[%s]. Other srcs: ",
                     i, tensor->src[i]->name, ggml_op_name(tensor->src[i]->op),
                     tensor->name, ggml_op_name(tensor->op));
                 for (size_t j = 0; j < GGML_MAX_SRC; j++) {
                     if (tensor->src[j] && tensor->src[j] != tensor && j != i) {
                         ggml_backend_meta_split_state ss = ggml_backend_meta_get_split_state(stc, tensor->src[j], true);
-                        GGML_LOG_ERROR("%s[%s](%s) ", tensor->src[j]->name, ggml_op_name(tensor->src[j]->op), axis_names[ss.axis]);
+                        GGML_LOG_ERROR("%s[%s](%s) ", tensor->src[j]->name, ggml_op_name(tensor->src[j]->op), ggml_backend_meta_split_axis_name(ss.axis));
                     }
                 }
                 GGML_LOG_ERROR("\n");
@@ -939,13 +937,10 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             case GGML_OP_MUL_MAT_ID: {
                 split_state = handle_mul_mat(src_ss);
                 if (split_state.axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
-                    const char * an[] = {"NONE","AXIS_0","AXIS_1","AXIS_2","AXIS_3","MIRRORED","PARTIAL","UNKNOWN"};
-                    GGML_LOG_ERROR("MUL_MAT %s returned UNKNOWN: src0=%s[%s](%s) src1=%s[%s](%s)\n",
+                    fprintf(stderr, "E MUL_MAT %s UNKNOWN: src0=%s(%s) src1=%s(%s)\n",
                         tensor->name,
-                        tensor->src[0]?tensor->src[0]->name:"null",
-                        tensor->src[0]?ggml_op_name(tensor->src[0]->op):"null", an[src_ss[0].axis],
-                        tensor->src[1]?tensor->src[1]->name:"null",
-                        tensor->src[1]?ggml_op_name(tensor->src[1]->op):"null", an[src_ss[1].axis]);
+                        tensor->src[0]?tensor->src[0]->name:"null", ggml_backend_meta_split_axis_name(src_ss[0].axis),
+                        tensor->src[1]?tensor->src[1]->name:"null", ggml_backend_meta_split_axis_name(src_ss[1].axis));
                 }
             } break;
             case GGML_OP_OUT_PROD: {
