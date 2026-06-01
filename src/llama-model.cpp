@@ -316,9 +316,13 @@ llama_model * llama_model_create(llama_model_loader & ml, const llama_model_para
 }
 
 struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const struct ggml_tensor * tensor, void * userdata) {
-    const llama_meta_device_get_split_state_userdata * ud = (const llama_meta_device_get_split_state_userdata *) userdata;
-    const llama_hparams & hparams = ud->model->hparams;
-    const std::string tensor_name = tensor->name;
+    // Wrap in try-catch to handle any unexpected exceptions (e.g., regex errors,
+    // tensor lookup failures) gracefully. On any error, default to MIRRORED.
+    try {
+        const llama_meta_device_get_split_state_userdata * ud = (const llama_meta_device_get_split_state_userdata *) userdata;
+        const llama_hparams & hparams = ud->model->hparams;
+        const std::string tensor_name = tensor->name;
+
 
     const std::regex pattern_q_weight        ("blk\\.\\d*\\.attn_q.weight");
     const std::regex pattern_kv_weight       ("blk\\.\\d*\\.attn_(k|v).weight");
@@ -666,6 +670,18 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
         split_state.n_segments = 1;
     }
     return split_state;
+    } catch (...) {
+        // If anything goes wrong (regex error, tensor lookup failure, etc.),
+        // default to MIRRORED to avoid crashing. The tensor will be duplicated
+        // on all GPUs, which is correct but uses more memory.
+        LLAMA_LOG_WARN("%s: exception while determining split state for tensor '%s', defaulting to MIRRORED\n",
+            __func__, tensor ? tensor->name : "(null)");
+        ggml_backend_meta_split_state fallback;
+        memset(&fallback, 0, sizeof(fallback));
+        fallback.axis = GGML_BACKEND_SPLIT_AXIS_MIRRORED;
+        fallback.n_segments = 1;
+        return fallback;
+    }
     GGML_UNUSED(userdata);
 }
 

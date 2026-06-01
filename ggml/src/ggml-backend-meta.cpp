@@ -625,6 +625,24 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             GGML_ASSERT(split_states_equal(src_ss[0], src_ss[1]));
             return {assume_sync ? GGML_BACKEND_SPLIT_AXIS_MIRRORED : GGML_BACKEND_SPLIT_AXIS_PARTIAL, {0}, 1};
         }
+        // src0 MIRRORED, src1 split on axis 0: the matmul reduces along axis 0 of src1
+        // (which is axis 1 of src0). Each GPU computes a partial sum over its shard of
+        // src1's axis 0. The result is PARTIAL and requires AllReduce to become MIRRORED.
+        // This covers the case where a MIRRORED weight is multiplied by an activation
+        // that is split on the reduction dimension (e.g., after an AllReduce-free layer).
+        if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED &&
+            src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_0) {
+            return {assume_sync ? GGML_BACKEND_SPLIT_AXIS_MIRRORED : GGML_BACKEND_SPLIT_AXIS_PARTIAL, {0}, 1};
+        }
+        // src0 split on axis 0, src1 MIRRORED: the split axis of src0 passes through
+        // to the output (the reduction is along axis 1 of src0, which is not split).
+        // This covers row-parallel matmul where the weight is split on the output dim.
+        if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_0 &&
+            src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED) {
+            ggml_backend_meta_split_state ret = src_ss[0];
+            ret.n_segments = 1;
+            return ret;
+        }
         GGML_ABORT("fatal error");
         //return {GGML_BACKEND_SPLIT_AXIS_UNKNOWN, {0}, 1};
     };
@@ -874,24 +892,28 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             if (dev_ctx && dev_ctx->get_split_state) {
                 ggml_backend_meta_split_state ret = dev_ctx->get_split_state(tensor, dev_ctx->get_split_state_ud);
                 if (ret.axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
-                    fprintf(stderr, "E device_context returned UNKNOWN for leaf %s[%s]\n",
-                        tensor->name, ggml_op_name(tensor->op));
-                    // Fall through to source-based calculation
-                } else {
-                    if (ret.axis >= 0 && ret.axis <= GGML_MAX_DIMS) {
-                        const int64_t granularity = ret.axis == GGML_BACKEND_SPLIT_AXIS_0 ? ggml_blck_size(tensor->type) : 1;
-                        int64_t ne_sum = 0;
-                        for (size_t sj = 0; sj < ret.n_segments*n_bufs; sj++) {
-                            GGML_ASSERT(ret.ne[sj] % granularity == 0);
-                            ne_sum += ret.ne[sj];
-                        }
-                        GGML_ASSERT(ne_sum == tensor->ne[ret.axis]);
-                    }
-                    return ret;
+                    GGML_LOG_WARN("%s: device_context returned UNKNOWN for leaf %s[%s], defaulting to MIRRORED\n",
+                        __func__, tensor->name, ggml_op_name(tensor->op));
+                    // Fallback: leaf tensors with unrecognized split state default to MIRRORED.
+                    // This covers runtime tensors (e.g., MTP state, sampling intermediates)
+                    // that are not model weights and have no split-axis configuration.
+                    return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, 1};
                 }
+                if (ret.axis >= 0 && ret.axis <= GGML_MAX_DIMS) {
+                    const int64_t granularity = ret.axis == GGML_BACKEND_SPLIT_AXIS_0 ? ggml_blck_size(tensor->type) : 1;
+                    int64_t ne_sum = 0;
+                    for (size_t sj = 0; sj < ret.n_segments*n_bufs; sj++) {
+                        GGML_ASSERT(ret.ne[sj] % granularity == 0);
+                        ne_sum += ret.ne[sj];
+                    }
+                    GGML_ASSERT(ne_sum == tensor->ne[ret.axis]);
+                }
+                return ret;
             } else {
-                fprintf(stderr, "E no device_context for leaf %s[%s] (dev_ctx=%p, get_fn=%p)\n",
-                    tensor->name, ggml_op_name(tensor->op), (void*)dev_ctx, dev_ctx?(void*)dev_ctx->get_split_state:nullptr);
+                GGML_LOG_WARN("%s: no device_context for leaf %s[%s], defaulting to MIRRORED\n",
+                    __func__, tensor->name, ggml_op_name(tensor->op));
+                // Fallback: no split state provider → assume MIRRORED.
+                return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, 1};
             }
         }
 
@@ -920,6 +942,8 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
         ggml_backend_meta_split_state split_state;
         switch (tensor->op) {
             case GGML_OP_NONE: {
+                // Leaf tensor with no split state provider (should not reach here normally,
+                // but handle it gracefully for robustness).
                 split_state = {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, 1};
             } break;
             case GGML_OP_DUP: {
