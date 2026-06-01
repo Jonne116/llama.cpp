@@ -516,6 +516,10 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             if (tensor->src[i] == nullptr || tensor->src[i] == tensor) {
                 continue;
             }
+            // Skip sources with NONE split state (scalars, empty tensors)
+            if (src_ss[i].axis == GGML_BACKEND_SPLIT_AXIS_NONE) {
+                continue;
+            }
             if (ret.axis == GGML_BACKEND_SPLIT_AXIS_NONE) {
                 ret = src_ss[i];
             } else if (!split_states_equal(src_ss[i], ret)) {
@@ -559,6 +563,17 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
         if (src_ss[2].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED && (src_ss[0].axis == src_ss[1].axis ||
            (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED && (src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_PARTIAL)))) {
             return src_ss[0]; // GGML_OP_ADD_ID
+        }
+        // src1 is MIRRORED and broadcasts over src0's split axis.
+        // The output inherits src0's split state.
+        if (src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED &&
+                src_ss[0].axis >= 0 && src_ss[0].axis < GGML_MAX_DIMS) {
+            return src_ss[0];
+        }
+        // src0 is MIRRORED and broadcasts over src1's split axis.
+        if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED &&
+                src_ss[1].axis >= 0 && src_ss[1].axis < GGML_MAX_DIMS) {
+            return src_ss[1];
         }
         GGML_ASSERT(tensor->src[2] == nullptr || src_ss[2].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED);
         return handle_generic(src_ss, /*scalar_only =*/ false);
