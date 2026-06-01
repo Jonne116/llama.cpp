@@ -794,6 +794,11 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             src_ss[1].axis >= 0 && src_ss[1].axis < GGML_MAX_DIMS) {
             return src_ss[1];
         }
+        // Debug: log when GET_ROWS falls through to handle_generic
+        fprintf(stderr, "E GET_ROWS %s falling through: data=%s(%s) idx=%s(%s)\n",
+            tensor->name,
+            tensor->src[0]?tensor->src[0]->name:"null", ggml_backend_meta_split_axis_name(src_ss[0].axis),
+            tensor->src[1]?tensor->src[1]->name:"null", ggml_backend_meta_split_axis_name(src_ss[1].axis));
         return handle_generic(src_ss, /*scalar_only =*/ true);
     };
 
