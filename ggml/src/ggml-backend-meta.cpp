@@ -753,6 +753,13 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
         if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_0 && src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED) {
             return src_ss[0];
         }
+        // When the data is split on a pass-through axis (1..3) and the indices
+        // are MIRRORED, each GPU selects rows from its own data portion.
+        // The split axis is preserved in the output.
+        if (src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED &&
+                src_ss[0].axis >= 0 && src_ss[0].axis < GGML_MAX_DIMS) {
+            return src_ss[0];
+        }
         return handle_generic(src_ss, /*scalar_only =*/ true);
     };
 
