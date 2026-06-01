@@ -874,8 +874,9 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             if (dev_ctx && dev_ctx->get_split_state) {
                 ggml_backend_meta_split_state ret = dev_ctx->get_split_state(tensor, dev_ctx->get_split_state_ud);
                 if (ret.axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
-                    // Device context couldn't determine split state for this leaf tensor.
-                    // Fall through to source-based calculation (will likely be MIRRORED).
+                    fprintf(stderr, "E device_context returned UNKNOWN for leaf %s[%s]\n",
+                        tensor->name, ggml_op_name(tensor->op));
+                    // Fall through to source-based calculation
                 } else {
                     if (ret.axis >= 0 && ret.axis <= GGML_MAX_DIMS) {
                         const int64_t granularity = ret.axis == GGML_BACKEND_SPLIT_AXIS_0 ? ggml_blck_size(tensor->type) : 1;
@@ -888,6 +889,9 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
                     }
                     return ret;
                 }
+            } else {
+                fprintf(stderr, "E no device_context for leaf %s[%s] (dev_ctx=%p, get_fn=%p)\n",
+                    tensor->name, ggml_op_name(tensor->op), (void*)dev_ctx, dev_ctx?(void*)dev_ctx->get_split_state:nullptr);
             }
         }
 
