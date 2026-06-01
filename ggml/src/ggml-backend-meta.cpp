@@ -926,6 +926,15 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             case GGML_OP_MUL_MAT:
             case GGML_OP_MUL_MAT_ID: {
                 split_state = handle_mul_mat(src_ss);
+                if (split_state.axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
+                    const char * an[] = {"NONE","AXIS_0","AXIS_1","AXIS_2","AXIS_3","MIRRORED","PARTIAL","UNKNOWN"};
+                    GGML_LOG_ERROR("MUL_MAT %s returned UNKNOWN: src0=%s[%s](%s) src1=%s[%s](%s)\n",
+                        tensor->name,
+                        tensor->src[0]?tensor->src[0]->name:"null",
+                        tensor->src[0]?ggml_op_name(tensor->src[0]->op):"null", an[src_ss[0].axis],
+                        tensor->src[1]?tensor->src[1]->name:"null",
+                        tensor->src[1]?ggml_op_name(tensor->src[1]->op):"null", an[src_ss[1].axis]);
+                }
             } break;
             case GGML_OP_OUT_PROD: {
                 split_state = handle_generic(src_ss, /*scalar_only =*/ true);

@@ -435,7 +435,10 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
             return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_1);
         }
         if (std::regex_match(tensor_name, pattern_ssm_dt) || std::regex_match(tensor_name, pattern_ssm_a)) {
-            return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_0, "ssm_out.weight");
+            // These are small broadcast tensors (shape [d_inner]) added/multiplied
+            // with activations split on AXIS_1 (batch). Must be MIRRORED so that
+            // handle_bin_bcast can broadcast them correctly.
+            return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_MIRRORED);
         }
         if (std::regex_match(tensor_name, pattern_ssm_alpha) || std::regex_match(tensor_name, pattern_ssm_beta) ||
                 std::regex_match(tensor_name, pattern_ssm_beta_alpha)) {
