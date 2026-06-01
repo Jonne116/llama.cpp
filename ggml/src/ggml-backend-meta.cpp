@@ -779,12 +779,20 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
         if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_0 && src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED) {
             return src_ss[0];
         }
-        // When the data is split on a pass-through axis (1..3) and the indices
-        // are MIRRORED, each GPU selects rows from its own data portion.
-        // The split axis is preserved in the output.
-        if (src_ss[1].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED &&
-                src_ss[0].axis >= 0 && src_ss[0].axis < GGML_MAX_DIMS) {
+        // GET_ROWS selects rows from the data tensor (src[0]) using indices (src[1]).
+        // The output split state follows the data tensor's split state since each
+        // GPU operates on its own data portion. The indices are broadcast/shared.
+        if (src_ss[0].axis >= 0 && src_ss[0].axis < GGML_MAX_DIMS) {
             return src_ss[0];
+        }
+        if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED ||
+            src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_PARTIAL) {
+            return src_ss[0];
+        }
+        // If data has NONE split (e.g., scalar), try to use indices' split state
+        if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_NONE &&
+            src_ss[1].axis >= 0 && src_ss[1].axis < GGML_MAX_DIMS) {
+            return src_ss[1];
         }
         return handle_generic(src_ss, /*scalar_only =*/ true);
     };
