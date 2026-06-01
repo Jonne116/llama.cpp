@@ -852,6 +852,11 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
                 continue;
             }
             src_ss[i] = ggml_backend_meta_get_split_state(stc, tensor->src[i], /*assume_sync =*/ true);
+            if (src_ss[i].axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
+                GGML_LOG_ERROR("UNKNOWN split state: src[%zu] %s[%s] -> tensor %s[%s]\n",
+                    i, tensor->src[i]->name, ggml_op_name(tensor->src[i]->op),
+                    tensor->name, ggml_op_name(tensor->op));
+            }
             GGML_ASSERT(src_ss[i].axis != GGML_BACKEND_SPLIT_AXIS_UNKNOWN);
         }
 
