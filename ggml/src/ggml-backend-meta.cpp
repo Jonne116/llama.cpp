@@ -529,6 +529,18 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
         if (scalar_only && ret.axis >= 0 && ret.axis < GGML_MAX_DIMS) {
             ret = {GGML_BACKEND_SPLIT_AXIS_UNKNOWN, {0}, 1};
         }
+        if (ret.axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
+            const char * an[] = {"NONE","AXIS_0","AXIS_1","AXIS_2","AXIS_3","MIRRORED","PARTIAL","UNKNOWN"};
+            std::string srcs;
+            for (size_t i = 0; i < GGML_MAX_SRC; i++) {
+                if (tensor->src[i] && tensor->src[i] != tensor) {
+                    if (!srcs.empty()) srcs += ", ";
+                    srcs += std::string(tensor->src[i]->name) + "(" + an[src_ss[i].axis] + ")";
+                }
+            }
+            GGML_LOG_ERROR("handle_generic(%s, scalar_only=%d) UNKNOWN: op=%s(%s) sources=[%s]\n",
+                ggml_op_name(tensor->op), scalar_only, tensor->name, ggml_op_name(tensor->op), srcs.c_str());
+        }
         GGML_ASSERT(ret.axis != GGML_BACKEND_SPLIT_AXIS_UNKNOWN);
         return ret;
     };
