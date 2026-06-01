@@ -657,12 +657,12 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             ret.n_segments = 1;
             return ret;
         }
-        // Unknown mul_mat split state combination. Return UNKNOWN so the
-        // top-level fallback can replace it with MIRRORED instead of crashing.
-        GGML_LOG_WARN("%s: unhandled mul_mat split state combo for %s[%s]: src0=%s src1=%s, defaulting to UNKNOWN (will fallback to MIRRORED)\n",
+        // Unknown mul_mat split state combination. Log detailed info for debugging.
+        GGML_LOG_ERROR("%s: FATAL unhandled mul_mat combo for %s[%s]: src0=%s(%s) src1=%s(%s)\n",
             __func__, tensor->name, ggml_op_name(tensor->op),
-            ggml_backend_meta_split_axis_name(src_ss[0].axis),
-            ggml_backend_meta_split_axis_name(src_ss[1].axis));
+            tensor->src[0]?tensor->src[0]->name:"null", ggml_backend_meta_split_axis_name(src_ss[0].axis),
+            tensor->src[1]?tensor->src[1]->name:"null", ggml_backend_meta_split_axis_name(src_ss[1].axis));
+        GGML_ABORT("fatal error: unhandled mul_mat split state combination");
         return {GGML_BACKEND_SPLIT_AXIS_UNKNOWN, {0}, 1};
     };
 
