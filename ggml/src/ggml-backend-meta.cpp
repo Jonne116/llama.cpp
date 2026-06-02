@@ -1127,30 +1127,47 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
 static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(const struct ggml_tensor * tensor, bool assume_sync) {
     const ggml_tensor * orig = tensor;
 
-    // For VIEW tensors, the buffer field may not be set directly.
-    // Trace through to the underlying data source to find the meta buffer.
-    if (tensor->view_src != nullptr && !ggml_backend_buffer_is_meta(tensor->buffer)) {
-        const ggml_tensor * base = tensor->view_src;
-        // Follow the view chain to find a tensor with a meta buffer
-        while (base != nullptr && !ggml_backend_buffer_is_meta(base->buffer)) {
-            if (base->view_src != nullptr) {
-                base = base->view_src;
-            } else if (base->src[0] != nullptr) {
-                base = base->src[0];
-            } else {
-                break;
+    // During graph execution, compute tensors may not have their buffer field
+    // set to the meta buffer (the meta backend manages buffers internally).
+    // For VIEW and compute tensors, trace through to find the underlying data
+    // source that has a meta buffer.
+    if (!ggml_backend_buffer_is_meta(tensor->buffer)) {
+        // Try tracing through view chain
+        if (tensor->view_src != nullptr) {
+            const ggml_tensor * base = tensor->view_src;
+            while (base != nullptr && !ggml_backend_buffer_is_meta(base->buffer)) {
+                if (base->view_src != nullptr) {
+                    base = base->view_src;
+                } else if (base->src[0] != nullptr && base->src[0] != base) {
+                    base = base->src[0];
+                } else {
+                    break;
+                }
+            }
+            if (base != nullptr && ggml_backend_buffer_is_meta(base->buffer)) {
+                ggml_backend_meta_buffer_context * buf_ctx = (ggml_backend_meta_buffer_context *) base->buffer->context;
+                return ggml_backend_meta_get_split_state(buf_ctx->get_simple_tensor_container(base), orig, assume_sync);
             }
         }
-        if (ggml_backend_buffer_is_meta(base->buffer)) {
-            // Use the base tensor's meta buffer but keep original tensor for offset/stride
-            ggml_backend_meta_buffer_context * buf_ctx = (ggml_backend_meta_buffer_context *) base->buffer->context;
-            return ggml_backend_meta_get_split_state(buf_ctx->get_simple_tensor_container(base), orig, assume_sync);
+        // Try tracing through source chain for compute tensors
+        if (tensor->src[0] != nullptr && tensor->src[0] != tensor) {
+            const ggml_tensor * base = tensor->src[0];
+            while (base != nullptr && !ggml_backend_buffer_is_meta(base->buffer)) {
+                if (base->view_src != nullptr) {
+                    base = base->view_src;
+                } else if (base->src[0] != nullptr && base->src[0] != base) {
+                    base = base->src[0];
+                } else {
+                    break;
+                }
+            }
+            if (base != nullptr && ggml_backend_buffer_is_meta(base->buffer)) {
+                ggml_backend_meta_buffer_context * buf_ctx = (ggml_backend_meta_buffer_context *) base->buffer->context;
+                return ggml_backend_meta_get_split_state(buf_ctx->get_simple_tensor_container(base), orig, assume_sync);
+            }
         }
-    }
 
-    // Tensors on non-meta buffers (CPU, single GPU, etc.) are not split.
-    // Return MIRRORED to indicate the tensor is available as-is.
-    if (!ggml_backend_buffer_is_meta(tensor->buffer)) {
+        // Tensors on non-meta buffers (CPU, single GPU, etc.) are not split.
         return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, {1}, 1};
     }
     ggml_backend_meta_buffer_context * buf_ctx = (ggml_backend_meta_buffer_context *) tensor->buffer->context;
@@ -2123,6 +2140,8 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
     };
 
     // Check if any source of a node is split on axis 0 (needs gathering).
+    // Uses the split state computed during rebuild (reliable) rather than
+    // checking buffer fields (unreliable during execution).
     auto node_has_split_axis0_input = [&](ggml_tensor * node) -> int {
         for (int s = 0; s < GGML_MAX_SRC; s++) {
             ggml_tensor * src = node->src[s];
@@ -2130,13 +2149,18 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
                 continue;
             }
             const ggml_backend_meta_split_state ss = ggml_backend_meta_get_split_state(src, /*assume_sync =*/ false);
-            // Debug: log split state for sampling ops
+            // Debug
             if (node_needs_gather(node)) {
                 static int dbg = 0;
                 if (dbg++ < 3) {
-                    fprintf(stderr, "META: %s src[%d]=%s buf_meta=%d axis=%d\n",
+                    const ggml_tensor * base = src;
+                    const char * base_name = "none";
+                    bool base_meta = false;
+                    if (src->view_src) { base = src->view_src; base_name = base->name; base_meta = ggml_backend_buffer_is_meta(base->buffer); }
+                    else if (src->src[0]) { base = src->src[0]; base_name = base->name; base_meta = ggml_backend_buffer_is_meta(base->buffer); }
+                    fprintf(stderr, "META: %s src[%d]=%s buf_meta=%d base=%s base_meta=%d axis=%d\n",
                         ggml_op_name(node->op), s, src->name,
-                        ggml_backend_buffer_is_meta(src->buffer), (int)ss.axis);
+                        ggml_backend_buffer_is_meta(src->buffer), base_name, base_meta, (int)ss.axis);
                     fflush(stderr);
                 }
             }
