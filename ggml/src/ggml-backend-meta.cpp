@@ -2107,6 +2107,16 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
                 continue;
             }
             const ggml_backend_meta_split_state ss = ggml_backend_meta_get_split_state(src, /*assume_sync =*/ false);
+            // Debug: log split state for sampling ops
+            if (node_needs_gather(node)) {
+                static int dbg = 0;
+                if (dbg++ < 3) {
+                    fprintf(stderr, "META: %s src[%d]=%s buf_meta=%d axis=%d\n",
+                        ggml_op_name(node->op), s, src->name,
+                        ggml_backend_buffer_is_meta(src->buffer), (int)ss.axis);
+                    fflush(stderr);
+                }
+            }
             if (ss.axis == GGML_BACKEND_SPLIT_AXIS_0) {
                 return s;
             }
