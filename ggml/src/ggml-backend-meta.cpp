@@ -536,9 +536,17 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
         return ret;
     };
 
-    // Some ops process data on a per-row bases:
+    // Some ops process data on a per-row basis:
+    // When the input is split on axis 0, the meta backend will gather the data
+    // before executing these ops (handled in graph_compute).
+    // The split state returned here is for the output tensor, which will be
+    // MIRRORED after the gather.
     auto handle_per_row = [&](const std::vector<ggml_backend_meta_split_state> & src_ss) -> ggml_backend_meta_split_state {
-        GGML_ASSERT(src_ss[0].axis != GGML_BACKEND_SPLIT_AXIS_0);
+        if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_0) {
+            // Input is split on axis 0 — will be gathered before execution.
+            // Output will be MIRRORED (on main device only).
+            return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, {1}, 1};
+        }
         return src_ss[0];
     };
 
@@ -912,7 +920,16 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             case GGML_OP_DIAG_MASK_ZERO: {
                 split_state = handle_generic(src_ss, /*scalar_only =*/ true);
             } break;
-            case GGML_OP_SOFT_MAX:
+            case GGML_OP_SOFT_MAX: {
+                // Softmax normalizes along axis 0. If input is split on axis 0,
+                // each device would normalize its own slice independently, giving
+                // wrong results. Gather before execution (handled in graph_compute).
+                if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_0) {
+                    split_state = (ggml_backend_meta_split_state){GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, {1}, 1};
+                } else {
+                    split_state = handle_generic(src_ss, /*scalar_only =*/ false);
+                }
+            } break;
             case GGML_OP_SOFT_MAX_BACK: {
                 split_state = handle_generic(src_ss, /*scalar_only =*/ false);
             } break;
@@ -2066,6 +2083,125 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
         return ret;
     };
 
+    // Check if a node's operation requires gathering its axis-0-split input before execution.
+    // These ops need the full tensor (all vocabulary) to produce correct results.
+    auto node_needs_gather = [&](ggml_tensor * node) -> bool {
+        switch (node->op) {
+            case GGML_OP_ARGMAX:
+            case GGML_OP_SOFT_MAX:
+            case GGML_OP_TOP_K:
+            case GGML_OP_ARGSORT:
+                return true;
+            default:
+                return false;
+        }
+    };
+
+    // Check if any source of a node is split on axis 0 (needs gathering).
+    auto node_has_split_axis0_input = [&](ggml_tensor * node) -> int {
+        for (int s = 0; s < GGML_MAX_SRC; s++) {
+            ggml_tensor * src = node->src[s];
+            if (src == nullptr) {
+                continue;
+            }
+            const ggml_backend_meta_split_state ss = ggml_backend_meta_get_split_state(src, /*assume_sync =*/ false);
+            if (ss.axis == GGML_BACKEND_SPLIT_AXIS_0) {
+                return s;
+            }
+        }
+        return -1;
+    };
+
+    // Gather a split tensor from all devices onto device 0.
+    // Copies each device's slice to the correct offset in a temp buffer on device 0.
+    // Returns the gathered byte size (for temp buffer sizing), or 0 if no gather needed.
+    auto allgather_fallback = [&](ggml_tensor * split_tensor, const std::vector<ggml_tensor *> & simple_tensors) -> ggml_status {
+        // Allocate temp buffer on device 0 for the full tensor
+        size_t full_size = ggml_nbytes(split_tensor);
+        auto & bc0 = backend_ctx->backend_configs[0];
+
+        // Use the first temp buffer for the gathered data
+        ggml_backend_buffer_ptr & gather_buf = bc0.bufs[0];
+        if (!gather_buf || ggml_backend_buffer_get_size(gather_buf.get()) < full_size) {
+            gather_buf.reset(ggml_backend_alloc_buffer(bc0.backend, full_size));
+        }
+        void * gather_base = ggml_backend_buffer_get_base(gather_buf.get());
+
+        // Copy each device's slice to the correct offset in the gathered buffer
+        const ggml_backend_meta_split_state ss = ggml_backend_meta_get_split_state(split_tensor, /*assume_sync =*/ false);
+
+        for (size_t j = 0; j < n_backends; j++) {
+            ggml_tensor * simple_t = simple_tensors[j];
+            if (simple_t == nullptr) {
+                continue;
+            }
+
+            size_t slice_size = ggml_nbytes(simple_t);
+            if (slice_size == 0) {
+                continue;
+            }
+
+            // Calculate the offset for this device's slice
+            // The split is along axis 0, so we need to find the starting element
+            size_t offset_elements = 0;
+            for (size_t k = 0; k < j; k++) {
+                ggml_tensor * prev_t = simple_tensors[k];
+                if (prev_t != nullptr) {
+                    offset_elements += prev_t->ne[0];
+                }
+            }
+
+            size_t byte_offset = offset_elements * ggml_type_size(simple_t->type);
+
+            // Create a view of the target buffer at the correct offset
+            ggml_tensor * dst_view = get_node_aux(simple_t);
+            dst_view->buffer = gather_buf.get();
+            dst_view->data   = (char *)gather_base + byte_offset;
+            dst_view->op     = GGML_OP_NONE;
+            dst_view->type   = simple_t->type;
+            for (size_t k = 0; k < GGML_MAX_DIMS; k++) {
+                dst_view->ne[k] = simple_t->ne[k];
+                dst_view->nb[k] = simple_t->nb[k];
+            }
+
+            // Copy from device j to device 0
+            auto & bcj = backend_ctx->backend_configs[j];
+            ggml_backend_tensor_copy_async(bcj.backend, bc0.backend, simple_t, dst_view);
+        }
+
+        // Synchronize device 0 to ensure the gather is complete
+        ggml_backend_synchronize(bc0.backend);
+
+        // Now update device 0's tensor to point to the gathered data
+        // We do this by creating a new tensor that wraps the gathered buffer
+        ggml_tensor * gathered = get_node_aux(split_tensor);
+        gathered->buffer = gather_buf.get();
+        gathered->data   = gather_base;
+        gathered->op     = GGML_OP_NONE;
+        gathered->type   = split_tensor->type;
+        for (size_t k = 0; k < GGML_MAX_DIMS; k++) {
+            gathered->ne[k] = split_tensor->ne[k];
+            gathered->nb[k] = split_tensor->nb[k];
+        }
+
+        // Replace the split tensor reference in device 0's subgraph nodes
+        // This is done by updating bcj.nodes for device 0
+        auto & bc0_nodes = backend_ctx->backend_configs[0].nodes;
+        for (int i = 0; i < cgraph->n_nodes; i++) {
+            ggml_tensor * node = bc0_nodes[i];
+            if (node == nullptr) {
+                continue;
+            }
+            for (int s = 0; s < GGML_MAX_SRC; s++) {
+                if (node->src[s] == split_tensor) {
+                    node->src[s] = gathered;
+                }
+            }
+        }
+
+        return GGML_STATUS_SUCCESS;
+    };
+
     // Preferentially use backend-specific allreduce_tensor_async (e.g. NCCL for CUDA), use a generic fallback if unavailable:
     auto allreduce_fallback = [&](size_t i) -> ggml_status {
         std::vector<ggml_cgraph *> step_cgraphs(n_backends, nullptr);
@@ -2184,6 +2320,53 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
 
 
     for (size_t i = 0; i < backend_ctx->n_subgraphs; i++) {
+        // Before executing this subgraph, check if any node needs its axis-0-split
+        // input gathered from all devices (e.g. ARGMAX, SOFT_MAX, TOP_K, ARGSORT).
+        if (n_backends > 1) {
+            ggml_cgraph * cgraph_i0 = backend_ctx->backend_configs[0].cgraphs[i].cgraph_main;
+            for (int n = 0; n < cgraph_i0->n_nodes; n++) {
+                ggml_tensor * node = cgraph_i0->nodes[n];
+                if (!node_needs_gather(node)) {
+                    continue;
+                }
+                int split_src_idx = node_has_split_axis0_input(node);
+                if (split_src_idx < 0) {
+                    continue;
+                }
+                ggml_tensor * split_tensor = node->src[split_src_idx];
+                if (split_tensor == nullptr) {
+                    continue;
+                }
+
+                // Collect the per-device simple tensors for the split input
+                // Use the global node index to look up per-device tensors
+                int node_global_idx = backend_ctx->backend_configs[0].cgraphs[i].offset + n;
+                std::vector<ggml_tensor *> simple_tensors(n_backends, nullptr);
+                bool all_valid = true;
+                for (size_t j = 0; j < n_backends; j++) {
+                    auto & bcj = backend_ctx->backend_configs[j];
+                    if (node_global_idx >= (int)bcj.nodes.size()) {
+                        all_valid = false;
+                        continue;
+                    }
+                    ggml_tensor * n_j = bcj.nodes[node_global_idx];
+                    if (!n_j || split_src_idx >= GGML_MAX_SRC || !n_j->src[split_src_idx]) {
+                        all_valid = false;
+                        continue;
+                    }
+                    simple_tensors[j] = n_j->src[split_src_idx];
+                }
+
+                if (all_valid) {
+                    ggml_status status = allgather_fallback(split_tensor, simple_tensors);
+                    if (status != GGML_STATUS_SUCCESS) {
+                        return status;
+                    }
+                }
+                break; // Only need to gather once per subgraph
+            }
+        }
+
         for (size_t j = 0; j < n_backends; j++) {
             auto & bcj = backend_ctx->backend_configs[j];
             const ggml_status status = ggml_backend_graph_compute_async(bcj.backend, bcj.cgraphs[i].cgraph_main);
