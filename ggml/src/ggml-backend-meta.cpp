@@ -2329,14 +2329,17 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
                 if (!node_needs_gather(node)) {
                     continue;
                 }
+                GGML_LOG_DEBUG("meta: subgraph %zu node %d (%s) needs gather check\n", i, n, ggml_op_name(node->op));
                 int split_src_idx = node_has_split_axis0_input(node);
                 if (split_src_idx < 0) {
+                    GGML_LOG_DEBUG("meta:   no axis-0-split input found\n");
                     continue;
                 }
                 ggml_tensor * split_tensor = node->src[split_src_idx];
                 if (split_tensor == nullptr) {
                     continue;
                 }
+                GGML_LOG_DEBUG("meta:   split input src[%d] = %s\n", split_src_idx, split_tensor->name);
 
                 // Collect the per-device simple tensors for the split input
                 // Use the global node index to look up per-device tensors
@@ -2346,11 +2349,13 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
                 for (size_t j = 0; j < n_backends; j++) {
                     auto & bcj = backend_ctx->backend_configs[j];
                     if (node_global_idx >= (int)bcj.nodes.size()) {
+                        GGML_LOG_DEBUG("meta:   device %zu: node_global_idx %d out of range\n", j, node_global_idx);
                         all_valid = false;
                         continue;
                     }
                     ggml_tensor * n_j = bcj.nodes[node_global_idx];
                     if (!n_j || split_src_idx >= GGML_MAX_SRC || !n_j->src[split_src_idx]) {
+                        GGML_LOG_DEBUG("meta:   device %zu: missing src[%d]\n", j, split_src_idx);
                         all_valid = false;
                         continue;
                     }
@@ -2358,10 +2363,13 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
                 }
 
                 if (all_valid) {
+                    GGML_LOG_DEBUG("meta:   gathering split tensor (%zu devices)\n", n_backends);
                     ggml_status status = allgather_fallback(split_tensor, simple_tensors);
                     if (status != GGML_STATUS_SUCCESS) {
                         return status;
                     }
+                } else {
+                    GGML_LOG_DEBUG("meta:   gather skipped (not all devices valid)\n");
                 }
                 break; // Only need to gather once per subgraph
             }
