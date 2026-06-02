@@ -2442,11 +2442,15 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
                 for (size_t j = 0; j < n_backends; j++) {
                     auto & bcj = backend_ctx->backend_configs[j];
                     if (node_global_idx >= (int)bcj.nodes.size()) {
+                        fprintf(stderr, "META: exec gather: node_global_idx %d >= bcj.nodes.size() %zu\n",
+                            node_global_idx, bcj.nodes.size());
                         all_valid = false;
                         continue;
                     }
                     ggml_tensor * n_j = bcj.nodes[node_global_idx];
                     if (!n_j || split_src_idx >= GGML_MAX_SRC || !n_j->src[split_src_idx]) {
+                        fprintf(stderr, "META: exec gather: dev %zu n_j=%p src[%d]=%p\n",
+                            j, (void*)n_j, split_src_idx, n_j ? (void*)n_j->src[split_src_idx] : nullptr);
                         all_valid = false;
                         continue;
                     }
@@ -2454,6 +2458,9 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
                 }
 
                 if (all_valid) {
+                    fprintf(stderr, "META: exec gather: allgather on node %d (%s) src[%d]\n",
+                        node_global_idx, ggml_op_name(node->op), split_src_idx);
+                    fflush(stderr);
                     ggml_status status = allgather_fallback(split_tensor, simple_tensors);
                     if (status != GGML_STATUS_SUCCESS) {
                         return status;
