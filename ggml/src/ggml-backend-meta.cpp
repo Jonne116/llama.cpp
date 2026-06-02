@@ -2223,7 +2223,8 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
     // Gather a split tensor from all devices onto device 0.
     // Copies each device's slice to the correct offset in a temp buffer on device 0.
     // Returns the gathered byte size (for temp buffer sizing), or 0 if no gather needed.
-    auto allgather_fallback = [&](ggml_tensor * split_tensor, const std::vector<ggml_tensor *> & simple_tensors) -> ggml_status {
+    auto allgather_fallback = [&](ggml_tensor * split_tensor, const std::vector<ggml_tensor *> & simple_tensors,
+                                    int node_global_idx, int src_idx) -> ggml_status {
         // Allocate temp buffer on device 0 for the full tensor
         size_t full_size = ggml_nbytes(split_tensor);
         auto & bc0 = backend_ctx->backend_configs[0];
@@ -2290,29 +2291,18 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
             gathered->nb[k] = split_tensor->nb[k];
         }
 
-        // Replace the split tensor reference in device 0's per-device nodes.
-        // The per-device nodes (bcj.nodes) have their own source chain that
-        // is used during execution. We must update those, not the original graph.
+        // Replace the split tensor reference in device 0's per-device node.
+        // Use the node index and source index to target the correct tensor.
         auto & bc0_nodes = backend_ctx->backend_configs[0].nodes;
-        bool replaced = false;
-        for (int i = 0; i < cgraph->n_nodes; i++) {
-            ggml_tensor * node = bc0_nodes[i];
-            if (node == nullptr) {
-                continue;
-            }
-            for (int s = 0; s < GGML_MAX_SRC; s++) {
-                // Match by comparing the original graph source pointer.
-                // The per-device node's src[s] should be the simple tensor
-                // that corresponds to the original split_tensor.
-                if (node->src[s] == split_tensor) {
-                    node->src[s] = gathered;
-                    replaced = true;
-                }
+        if (node_global_idx < (int)bc0_nodes.size() && bc0_nodes[node_global_idx]) {
+            ggml_tensor * node = bc0_nodes[node_global_idx];
+            if (src_idx >= 0 && src_idx < GGML_MAX_SRC) {
+                node->src[src_idx] = gathered;
+                fprintf(stderr, "META: allgather: replaced bc0_nodes[%d]->src[%d] = %p (was %p)\n",
+                    node_global_idx, src_idx, (void*)gathered, (void*)node->src[src_idx]);
+                fflush(stderr);
             }
         }
-        fprintf(stderr, "META: allgather: replaced=%d gathered=%p split=%p\n",
-            replaced, (void*)gathered, (void*)split_tensor);
-        fflush(stderr);
 
         return GGML_STATUS_SUCCESS;
     };
@@ -2470,7 +2460,7 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
                     fprintf(stderr, "META: exec gather: allgather on node %d (%s) src[%d]\n",
                         node_global_idx, ggml_op_name(node->op), split_src_idx);
                     fflush(stderr);
-                    ggml_status status = allgather_fallback(split_tensor, simple_tensors);
+                    ggml_status status = allgather_fallback(split_tensor, simple_tensors, node_global_idx, split_src_idx);
                     if (status != GGML_STATUS_SUCCESS) {
                         return status;
                     }
