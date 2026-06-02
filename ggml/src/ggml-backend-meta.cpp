@@ -2225,62 +2225,41 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
     // Returns the gathered byte size (for temp buffer sizing), or 0 if no gather needed.
     auto allgather_fallback = [&](ggml_tensor * split_tensor, const std::vector<ggml_tensor *> & simple_tensors,
                                     int node_global_idx, int src_idx) -> ggml_status {
-        // Allocate temp buffer on device 0 for the full tensor
         size_t full_size = ggml_nbytes(split_tensor);
         auto & bc0 = backend_ctx->backend_configs[0];
 
-        // Use the first temp buffer for the gathered data
+        // Allocate temp buffer on device 0 for the full tensor
         ggml_backend_buffer_ptr & gather_buf = bc0.bufs[0];
         if (!gather_buf || ggml_backend_buffer_get_size(gather_buf.get()) < full_size) {
             gather_buf.reset(ggml_backend_alloc_buffer(bc0.backend, full_size));
         }
         void * gather_base = ggml_backend_buffer_get_base(gather_buf.get());
 
-        // Copy each device's slice to the correct offset in the gathered buffer
+        // Copy each device's slice to host memory, then upload to device 0.
+        // This avoids cudaMemcpyPeerAsync issues with offset pointers.
+        std::unique_ptr<char[]> host_buf(new char[full_size]);
+
         for (size_t j = 0; j < n_backends; j++) {
             ggml_tensor * simple_t = simple_tensors[j];
-            if (simple_t == nullptr) {
+            if (simple_t == nullptr || ggml_nbytes(simple_t) == 0) {
                 continue;
             }
 
-            size_t slice_size = ggml_nbytes(simple_t);
-            if (slice_size == 0) {
-                continue;
-            }
-
-            // Calculate the offset for this device's slice
-            // The split is along axis 0, so we need to find the starting element
+            // Calculate byte offset for this device's slice
             size_t offset_elements = 0;
             for (size_t k = 0; k < j; k++) {
-                ggml_tensor * prev_t = simple_tensors[k];
-                if (prev_t != nullptr) {
-                    offset_elements += prev_t->ne[0];
+                if (simple_tensors[k]) {
+                    offset_elements += simple_tensors[k]->ne[0];
                 }
             }
-
             size_t byte_offset = offset_elements * ggml_type_size(simple_t->type);
+            size_t slice_size = ggml_nbytes(simple_t);
 
-            // Create a view of the target buffer at the correct offset
-            ggml_tensor * dst_view = get_node_aux(simple_t);
-            dst_view->buffer = gather_buf.get();
-            dst_view->data   = (char *)gather_base + byte_offset;
-            dst_view->op     = GGML_OP_NONE;
-            dst_view->type   = simple_t->type;
-            for (size_t k = 0; k < GGML_MAX_DIMS; k++) {
-                dst_view->ne[k] = simple_t->ne[k];
-                dst_view->nb[k] = simple_t->nb[k];
-            }
-
-            // Copy from device j to device 0
-            auto & bcj = backend_ctx->backend_configs[j];
-            ggml_backend_tensor_copy_async(bcj.backend, bc0.backend, simple_t, dst_view);
+            // Copy from device j to host
+            ggml_backend_tensor_get(simple_t, host_buf.get() + byte_offset, 0, slice_size);
         }
 
-        // Synchronize device 0 to ensure the gather is complete
-        ggml_backend_synchronize(bc0.backend);
-
-        // Now update device 0's tensor to point to the gathered data
-        // We do this by creating a new tensor that wraps the gathered buffer
+        // Create gathered tensor pointing to device 0 buffer
         ggml_tensor * gathered = get_node_aux(split_tensor);
         gathered->buffer = gather_buf.get();
         gathered->data   = gather_base;
@@ -2291,15 +2270,17 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
             gathered->nb[k] = split_tensor->nb[k];
         }
 
+        // Upload full gathered tensor to device 0
+        ggml_backend_tensor_set(gathered, host_buf.get(), 0, full_size);
+
         // Replace the split tensor reference in device 0's per-device node.
-        // Use the node index and source index to target the correct tensor.
         auto & bc0_nodes = backend_ctx->backend_configs[0].nodes;
         if (node_global_idx < (int)bc0_nodes.size() && bc0_nodes[node_global_idx]) {
             ggml_tensor * node = bc0_nodes[node_global_idx];
             if (src_idx >= 0 && src_idx < GGML_MAX_SRC) {
                 node->src[src_idx] = gathered;
-                fprintf(stderr, "META: allgather: replaced bc0_nodes[%d]->src[%d] = %p (was %p)\n",
-                    node_global_idx, src_idx, (void*)gathered, (void*)node->src[src_idx]);
+                fprintf(stderr, "META: allgather: replaced bc0_nodes[%d]->src[%d] = %p\n",
+                    node_global_idx, src_idx, (void*)gathered);
                 fflush(stderr);
             }
         }
