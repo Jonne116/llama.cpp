@@ -2319,6 +2319,19 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
     };
 
 
+    GGML_LOG_DEBUG("meta: graph_compute n_backends=%zu n_subgraphs=%zu n_nodes=%d\n",
+        n_backends, backend_ctx->n_subgraphs, cgraph->n_nodes);
+
+    // Log all ops in the graph for debugging
+    {
+        std::string ops;
+        for (int i = 0; i < cgraph->n_nodes; i++) {
+            if (i > 0) ops += " ";
+            ops += ggml_op_name(cgraph->nodes[i]->op);
+        }
+        GGML_LOG_DEBUG("meta: ops: %s\n", ops.c_str());
+    }
+
     for (size_t i = 0; i < backend_ctx->n_subgraphs; i++) {
         // Before executing this subgraph, check if any node needs its axis-0-split
         // input gathered from all devices (e.g. ARGMAX, SOFT_MAX, TOP_K, ARGSORT).
