@@ -2290,20 +2290,29 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
             gathered->nb[k] = split_tensor->nb[k];
         }
 
-        // Replace the split tensor reference in device 0's subgraph nodes
-        // This is done by updating bcj.nodes for device 0
+        // Replace the split tensor reference in device 0's per-device nodes.
+        // The per-device nodes (bcj.nodes) have their own source chain that
+        // is used during execution. We must update those, not the original graph.
         auto & bc0_nodes = backend_ctx->backend_configs[0].nodes;
+        bool replaced = false;
         for (int i = 0; i < cgraph->n_nodes; i++) {
             ggml_tensor * node = bc0_nodes[i];
             if (node == nullptr) {
                 continue;
             }
             for (int s = 0; s < GGML_MAX_SRC; s++) {
+                // Match by comparing the original graph source pointer.
+                // The per-device node's src[s] should be the simple tensor
+                // that corresponds to the original split_tensor.
                 if (node->src[s] == split_tensor) {
                     node->src[s] = gathered;
+                    replaced = true;
                 }
             }
         }
+        fprintf(stderr, "META: allgather: replaced=%d gathered=%p split=%p\n",
+            replaced, (void*)gathered, (void*)split_tensor);
+        fflush(stderr);
 
         return GGML_STATUS_SUCCESS;
     };
