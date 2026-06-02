@@ -2062,13 +2062,28 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
 
                 i = i_delayed;
 
-                // Pre-compute gather needs for this subgraph
+                // Pre-compute gather needs for this subgraph.
+                // Instead of gathering at execution time (expensive for large tensors),
+                // we force the split state of sources to MIRRORED so each GPU has full data.
                 int gather_nd = find_gather_node(i_start, i);
                 if (gather_nd >= 0) {
-                    fprintf(stderr, "META: subgraph %zu (nodes %d-%d): gather at node %d (%s) src[%d]\n",
-                        n_subgraphs, i_start, i, gather_nd,
-                        ggml_op_name(cgraph->nodes[i_start + gather_nd]->op), gather_src_idx);
-                    fflush(stderr);
+                    int node_global_idx = i_start + gather_nd;
+                    ggml_tensor * node = cgraph->nodes[node_global_idx];
+                    ggml_tensor * split_src = node->src[gather_src_idx];
+                    // Override split state of the source to MIRRORED.
+                    // This forces the allocator to put full data on all GPUs.
+                    if (ggml_backend_buffer_is_meta(split_src->buffer)) {
+                        ggml_backend_meta_buffer_context * src_buf_ctx =
+                            (ggml_backend_meta_buffer_context *) split_src->buffer->context;
+                        auto key = std::make_pair((const ggml_tensor *)split_src, false);
+                        src_buf_ctx->split_state_cache[key].first = {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, {1}, 1};
+                        fprintf(stderr, "META: subgraph %zu: forcing %s to MIRRORED (was axis-0-split)\n",
+                            n_subgraphs, split_src->name);
+                        fflush(stderr);
+                    }
+                    // Disable gather since data is now MIRRORED
+                    gather_nd = -1;
+                    gather_src_idx = -1;
                 }
 
                 for (size_t j = 0; j < n_backends; j++) {
@@ -2235,10 +2250,8 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
         }
         void * gather_base = ggml_backend_buffer_get_base(gather_buf.get());
 
-        // Copy each device's slice to host memory, then upload to device 0.
-        // This avoids cudaMemcpyPeerAsync issues with offset pointers.
-        std::unique_ptr<char[]> host_buf(new char[full_size]);
-
+        // Copy each device's slice to the correct offset in the gather buffer.
+        // Use ggml_backend_tensor_copy which handles cross-device copies properly.
         for (size_t j = 0; j < n_backends; j++) {
             ggml_tensor * simple_t = simple_tensors[j];
             if (simple_t == nullptr || ggml_nbytes(simple_t) == 0) {
@@ -2253,11 +2266,31 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
                 }
             }
             size_t byte_offset = offset_elements * ggml_type_size(simple_t->type);
-            size_t slice_size = ggml_nbytes(simple_t);
 
-            // Copy from device j to host
-            ggml_backend_tensor_get(simple_t, host_buf.get() + byte_offset, 0, slice_size);
+            // Create a view tensor in the gather buffer at the correct offset
+            ggml_tensor * dst_view = get_node_aux(simple_t);
+            dst_view->buffer = gather_buf.get();
+            dst_view->data   = (char *)gather_base + byte_offset;
+            dst_view->op     = GGML_OP_NONE;
+            dst_view->type   = simple_t->type;
+            for (size_t k = 0; k < GGML_MAX_DIMS; k++) {
+                dst_view->ne[k] = simple_t->ne[k];
+                dst_view->nb[k] = simple_t->nb[k];
+            }
+
+            // Copy from device j to device 0
+            auto & bcj = backend_ctx->backend_configs[j];
+            if (j == 0) {
+                // Same device: use tensor_copy (synchronous)
+                ggml_backend_tensor_copy(simple_t, dst_view);
+            } else {
+                // Cross-device: use async copy
+                ggml_backend_tensor_copy_async(bcj.backend, bc0.backend, simple_t, dst_view);
+            }
         }
+
+        // Synchronize device 0
+        ggml_backend_synchronize(bc0.backend);
 
         // Create gathered tensor pointing to device 0 buffer
         ggml_tensor * gathered = get_node_aux(split_tensor);
@@ -2269,9 +2302,6 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
             gathered->ne[k] = split_tensor->ne[k];
             gathered->nb[k] = split_tensor->nb[k];
         }
-
-        // Upload full gathered tensor to device 0
-        ggml_backend_tensor_set(gathered, host_buf.get(), 0, full_size);
 
         // Replace the split tensor reference in device 0's per-device node.
         auto & bc0_nodes = backend_ctx->backend_configs[0].nodes;
