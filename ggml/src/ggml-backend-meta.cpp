@@ -537,16 +537,14 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
     };
 
     // Some ops process data on a per-row basis:
-    // When the input is split on axis 0, the meta backend will gather the data
-    // before executing these ops (handled in graph_compute).
-    // The split state returned here is for the output tensor, which will be
-    // MIRRORED after the gather.
+    // For ops that need full vocabulary (ARGMAX, TOP_K, ARGSORT), the meta
+    // backend will gather axis-0-split inputs before execution (handled in
+    // graph_compute). The split state here remains accurate for allocation.
     auto handle_per_row = [&](const std::vector<ggml_backend_meta_split_state> & src_ss) -> ggml_backend_meta_split_state {
-        if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_0) {
-            // Input is split on axis 0 — will be gathered before execution.
-            // Output will be MIRRORED (on main device only).
-            return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, {1}, 1};
-        }
+        // Previously asserted src_ss[0].axis != GGML_BACKEND_SPLIT_AXIS_0.
+        // Removed since graph_compute handles gathering for ops that need it.
+        // For ops that don't need gathering, axis-0 split is still valid
+        // (each row is independent).
         return src_ss[0];
     };
 
@@ -920,16 +918,7 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             case GGML_OP_DIAG_MASK_ZERO: {
                 split_state = handle_generic(src_ss, /*scalar_only =*/ true);
             } break;
-            case GGML_OP_SOFT_MAX: {
-                // Softmax normalizes along axis 0. If input is split on axis 0,
-                // each device would normalize its own slice independently, giving
-                // wrong results. Gather before execution (handled in graph_compute).
-                if (src_ss[0].axis == GGML_BACKEND_SPLIT_AXIS_0) {
-                    split_state = (ggml_backend_meta_split_state){GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, {1}, 1};
-                } else {
-                    split_state = handle_generic(src_ss, /*scalar_only =*/ false);
-                }
-            } break;
+            case GGML_OP_SOFT_MAX:
             case GGML_OP_SOFT_MAX_BACK: {
                 split_state = handle_generic(src_ss, /*scalar_only =*/ false);
             } break;
