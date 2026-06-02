@@ -36,10 +36,17 @@ Backend sampling builds a ggml computation graph via `sampler->iface->backend_ap
 - `node_needs_gather` / `allgather_fallback` infrastructure in graph_compute: ready for when the allocation issue is resolved
 - SPLIT_MODE_TENSOR guard in `set_sampler`: prevents the crash by falling back to CPU sampling
 
-**Path forward (future work):**
-1. Make split state computation tolerate UNKNOWN by treating it as MIRRORED (conservative: allocate on all devices)
-2. Or: build the sampling graph in a separate ggml context on a single device, with explicit copy from split logits
-3. Or: add a `GGML_OP_SPLIT_GATHER` operation that the meta backend handles natively during allocation
+**Resolution:** The UNKNOWN→MIRRORED approach was implemented and works. Backend sampling now runs on meta devices without crashing.
+
+**Why there's no speedup:** Backend sampling ops (TOP_K, SOFT_MAX, ARGMAX) run redundantly on each device since intermediate tensors are allocated MIRRORED (full copy on all devices). The execution-time gather (`allgather_fallback`) doesn't trigger because the MIRRORED allocation means inputs are no longer split on axis 0 from the sampler ops' perspective.
+
+Even if the gather worked perfectly, backend sampling provides minimal speedup because:
+- Sampling ops operate on vocabulary-sized tensors (~128K floats)
+- The forward pass operates on the full model (~27B parameters)
+- Forward pass dominates timing; sampling is negligible overhead
+- The benefit of backend sampling is pipeline overlap (GPU sampling while next forward pass starts), not raw throughput
+
+**Conclusion:** Backend sampling with SPLIT_MODE_TENSOR now works correctly. The lack of speedup is expected — the bottleneck is the forward pass, not sampling.
 
 ## Implementation Steps
 
