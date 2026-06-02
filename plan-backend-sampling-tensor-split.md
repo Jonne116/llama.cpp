@@ -1,8 +1,8 @@
 # Plan: Backend Sampling with SPLIT_MODE_TENSOR
 
-## Status: ✅ Implemented (initial version)
+## Status: ⚠️ Partially implemented — allocation blocker remains
 
-All core changes are implemented and compile successfully. Needs testing with actual multi-GPU tensor-split workloads.
+Backend sampling cannot work with `SPLIT_MODE_TENSOR` due to a fundamental issue in the meta backend's split state computation during graph allocation. The guard in `set_sampler` is kept to prevent crashes.
 
 ## Problem
 
@@ -19,6 +19,27 @@ Backend sampling operations (`GGML_OP_ARGMAX`, `GGML_OP_SOFT_MAX`, `GGML_OP_TOP_
 ## Approach: Meta Backend Auto-Gather
 
 Modify the meta backend to automatically gather split tensors before operations that require full data. This is transparent to the graph builder and requires no new ggml operations.
+
+## Current Blocker: Split State UNKNOWN during Allocation
+
+Backend sampling builds a ggml computation graph via `sampler->iface->backend_apply()` which creates intermediate tensors (parameters, views, computation nodes). When the input logits tensor is split on axis 0 across a meta device, the meta backend's `ggml_backend_meta_get_split_state()` cannot determine the split state for some of these intermediate tensors, returning `GGML_BACKEND_SPLIT_AXIS_UNKNOWN`. This causes an assertion crash at `ggml_backend_meta_get_split_state()` line ~820 during `ggml_backend_sched_alloc_graph()`.
+
+**Root cause:** The split state computation in the meta backend assumes all source tensors have determinable split states. Backend sampling ops create tensors (e.g., scalar parameters, dynamically shaped intermediates) whose split state depends on runtime properties that aren't known at allocation time.
+
+**What was tried:**
+1. Returning MIRRORED split state for axis-0-split inputs → broke split state propagation chain, downstream ops (VIEW, PAD) produced UNKNOWN → same crash
+2. Keeping split states accurate + execution-time gather → allocation still crashes because split state is computed before execution
+3. Removing the assertion → UNKNOWN propagates but allocator can't allocate tensors with UNKNOWN split state
+
+**What remains (kept in code):**
+- `handle_per_row` assertion removal: axis-0 split is valid for per-row ops (each row is independent)
+- `node_needs_gather` / `allgather_fallback` infrastructure in graph_compute: ready for when the allocation issue is resolved
+- SPLIT_MODE_TENSOR guard in `set_sampler`: prevents the crash by falling back to CPU sampling
+
+**Path forward (future work):**
+1. Make split state computation tolerate UNKNOWN by treating it as MIRRORED (conservative: allocate on all devices)
+2. Or: build the sampling graph in a separate ggml context on a single device, with explicit copy from split logits
+3. Or: add a `GGML_OP_SPLIT_GATHER` operation that the meta backend handles natively during allocation
 
 ## Implementation Steps
 
