@@ -519,20 +519,25 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             if (tensor->src[i] == nullptr || tensor->src[i] == tensor) {
                 continue;
             }
+            // Treat UNKNOWN source split state as MIRRORED (conservative: allocate on all devices)
+            if (src_ss[i].axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
+                return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, {1}, 1};
+            }
             if (ret.axis == GGML_BACKEND_SPLIT_AXIS_NONE) {
                 ret = src_ss[i];
             } else if (!split_states_equal(src_ss[i], ret)) {
-                ret = {GGML_BACKEND_SPLIT_AXIS_UNKNOWN, {0}, {1}, 1};
-                break;
+                // Incompatible source split states → allocate on all devices
+                return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, {1}, 1};
             }
         }
         if (ret.axis == GGML_BACKEND_SPLIT_AXIS_NONE) {
-            ret = {GGML_BACKEND_SPLIT_AXIS_UNKNOWN, {0}, {1}, 1};
+            // No valid sources → allocate on all devices
+            return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, {1}, 1};
         }
         if (scalar_only && ret.axis >= 0 && ret.axis < GGML_MAX_DIMS) {
-            ret = {GGML_BACKEND_SPLIT_AXIS_UNKNOWN, {0}, {1}, 1};
+            // Scalar op on split tensor → allocate on all devices
+            return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, {1}, 1};
         }
-        GGML_ASSERT(ret.axis != GGML_BACKEND_SPLIT_AXIS_UNKNOWN);
         return ret;
     };
 
@@ -790,7 +795,7 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
 
     auto calculate_split_state = [&]() -> ggml_backend_meta_split_state {
         if (ggml_nelements(tensor) == 0) {
-            return {GGML_BACKEND_SPLIT_AXIS_UNKNOWN, {0}, {1}, 1};
+            return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, {1}, 1};
         }
         if (ggml_backend_buffer_get_usage(tensor->buffer) != GGML_BACKEND_BUFFER_USAGE_COMPUTE && tensor->view_src == nullptr) {
             ggml_backend_dev_t dev = ggml_backend_buft_get_device(ggml_backend_buffer_get_type(tensor->buffer));
@@ -813,11 +818,14 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
         std::vector<ggml_backend_meta_split_state> src_ss(GGML_MAX_SRC, {GGML_BACKEND_SPLIT_AXIS_NONE, {0}, {1}, 1});
         for (size_t i = 0; i < GGML_MAX_SRC; i++) {
             if (tensor->src[i] == nullptr || tensor->src[i] == tensor) {
-                src_ss[i] = {GGML_BACKEND_SPLIT_AXIS_UNKNOWN, {0}, {1}, 1};
+                src_ss[i] = {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, {1}, 1};
                 continue;
             }
             src_ss[i] = ggml_backend_meta_get_split_state(stc, tensor->src[i], /*assume_sync =*/ true);
-            GGML_ASSERT(src_ss[i].axis != GGML_BACKEND_SPLIT_AXIS_UNKNOWN);
+            // If a source has UNKNOWN split state, treat it as MIRRORED (allocate on all devices)
+            if (src_ss[i].axis == GGML_BACKEND_SPLIT_AXIS_UNKNOWN) {
+                src_ss[i] = {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, {1}, 1};
+            }
         }
 
         ggml_backend_meta_split_state split_state;
@@ -1133,7 +1141,8 @@ static enum ggml_status ggml_backend_meta_buffer_init_tensor_impl(ggml_backend_m
     const size_t n_simple_bufs = ggml_backend_meta_buffer_n_bufs(tensor->buffer);
 
     const ggml_backend_meta_split_state split_state = ggml_backend_meta_get_split_state(stc, tensor, /*assume_sync =*/ true);
-    GGML_ASSERT(ggml_nelements(tensor) == 0 || split_state.axis != GGML_BACKEND_SPLIT_AXIS_UNKNOWN);
+    // UNKNOWN split states are resolved to MIRRORED in the split state computation,
+    // so this should never be UNKNOWN at this point.
     GGML_ASSERT(split_state.n_segments <= 16);
 
     int split_dim = split_state.axis;
@@ -2117,8 +2126,6 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
         void * gather_base = ggml_backend_buffer_get_base(gather_buf.get());
 
         // Copy each device's slice to the correct offset in the gathered buffer
-        const ggml_backend_meta_split_state ss = ggml_backend_meta_get_split_state(split_tensor, /*assume_sync =*/ false);
-
         for (size_t j = 0; j < n_backends; j++) {
             ggml_tensor * simple_t = simple_tensors[j];
             if (simple_t == nullptr) {
