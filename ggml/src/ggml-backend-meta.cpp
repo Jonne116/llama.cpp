@@ -1125,7 +1125,11 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
 }
 
 static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(const struct ggml_tensor * tensor, bool assume_sync) {
-    GGML_ASSERT(ggml_backend_buffer_is_meta(tensor->buffer));
+    // Tensors on non-meta buffers (CPU, single GPU, etc.) are not split.
+    // Return MIRRORED to indicate the tensor is available as-is.
+    if (!ggml_backend_buffer_is_meta(tensor->buffer)) {
+        return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, {1}, 1};
+    }
     ggml_backend_meta_buffer_context * buf_ctx = (ggml_backend_meta_buffer_context *) tensor->buffer->context;
     return ggml_backend_meta_get_split_state(buf_ctx->get_simple_tensor_container(tensor), tensor, assume_sync);
 }
