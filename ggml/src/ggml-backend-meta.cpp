@@ -1644,6 +1644,7 @@ struct ggml_backend_meta_context {
         ggml_cgraph * cgraph_main = nullptr;
         int           offset      = 0; // Node offset vs. original graph
         int           gather_node = -1; // Node index (relative to offset) needing gather, or -1
+        int           gather_src  = -1; // Source index of the split tensor to gather
 
         std::vector<ggml_cgraph *> cgraphs_aux;
     };
@@ -2006,6 +2007,8 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
 
             // Find the first node in a subgraph range that needs gather
             // Returns relative node index, or -1 if none
+            // Sets gather_src_idx to the source index of the split tensor
+            int gather_src_idx = -1;
             auto find_gather_node = [&](int subgraph_start, int subgraph_end) -> int {
                 for (int i = subgraph_start; i <= subgraph_end && i < cgraph->n_nodes; i++) {
                     ggml_tensor * node = cgraph->nodes[i];
@@ -2016,10 +2019,12 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
                         if (src == nullptr) continue;
                         const ggml_backend_meta_split_state ss = ggml_backend_meta_get_split_state(src, false);
                         if (ss.axis == GGML_BACKEND_SPLIT_AXIS_0) {
+                            gather_src_idx = s;
                             return i - subgraph_start; // relative index
                         }
                     }
                 }
+                gather_src_idx = -1;
                 return -1;
             };
 
@@ -2059,11 +2064,18 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
 
                 // Pre-compute gather needs for this subgraph
                 int gather_nd = find_gather_node(i_start, i);
+                if (gather_nd >= 0) {
+                    fprintf(stderr, "META: subgraph %zu (nodes %d-%d): gather at node %d (%s) src[%d]\n",
+                        n_subgraphs, i_start, i, gather_nd,
+                        ggml_op_name(cgraph->nodes[i_start + gather_nd]->op), gather_src_idx);
+                    fflush(stderr);
+                }
 
                 for (size_t j = 0; j < n_backends; j++) {
                     auto & bcj = backend_ctx->backend_configs[j];
                     bcj.cgraphs[n_subgraphs].offset = i_start;
                     bcj.cgraphs[n_subgraphs].gather_node = gather_nd;
+                    bcj.cgraphs[n_subgraphs].gather_src = gather_src_idx;
                 }
                 n_subgraphs++;
                 i_start = i + 1;
@@ -2419,42 +2431,32 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
         if (n_backends > 1) {
             auto & bc0 = backend_ctx->backend_configs[0];
             int gather_nd = bc0.cgraphs[i].gather_node;
-            if (gather_nd >= 0) {
-                // Find the split source from the original graph node
+            int split_src_idx = bc0.cgraphs[i].gather_src;
+            if (gather_nd >= 0 && split_src_idx >= 0) {
                 int node_global_idx = bc0.cgraphs[i].offset + gather_nd;
                 ggml_tensor * node = cgraph->nodes[node_global_idx];
-                int split_src_idx = -1;
-                for (int s = 0; s < GGML_MAX_SRC; s++) {
-                    if (node->src[s] &&
-                        ggml_backend_meta_get_split_state(node->src[s], false).axis == GGML_BACKEND_SPLIT_AXIS_0) {
-                        split_src_idx = s;
-                        break;
+                ggml_tensor * split_tensor = node->src[split_src_idx];
+                // Collect per-device simple tensors for the split input
+                std::vector<ggml_tensor *> simple_tensors(n_backends, nullptr);
+                bool all_valid = true;
+                for (size_t j = 0; j < n_backends; j++) {
+                    auto & bcj = backend_ctx->backend_configs[j];
+                    if (node_global_idx >= (int)bcj.nodes.size()) {
+                        all_valid = false;
+                        continue;
                     }
+                    ggml_tensor * n_j = bcj.nodes[node_global_idx];
+                    if (!n_j || split_src_idx >= GGML_MAX_SRC || !n_j->src[split_src_idx]) {
+                        all_valid = false;
+                        continue;
+                    }
+                    simple_tensors[j] = n_j->src[split_src_idx];
                 }
-                if (split_src_idx >= 0) {
-                    ggml_tensor * split_tensor = node->src[split_src_idx];
-                    // Collect per-device simple tensors for the split input
-                    std::vector<ggml_tensor *> simple_tensors(n_backends, nullptr);
-                    bool all_valid = true;
-                    for (size_t j = 0; j < n_backends; j++) {
-                        auto & bcj = backend_ctx->backend_configs[j];
-                        if (node_global_idx >= (int)bcj.nodes.size()) {
-                            all_valid = false;
-                            continue;
-                        }
-                        ggml_tensor * n_j = bcj.nodes[node_global_idx];
-                        if (!n_j || split_src_idx >= GGML_MAX_SRC || !n_j->src[split_src_idx]) {
-                            all_valid = false;
-                            continue;
-                        }
-                        simple_tensors[j] = n_j->src[split_src_idx];
-                    }
 
-                    if (all_valid) {
-                        ggml_status status = allgather_fallback(split_tensor, simple_tensors);
-                        if (status != GGML_STATUS_SUCCESS) {
-                            return status;
-                        }
+                if (all_valid) {
+                    ggml_status status = allgather_fallback(split_tensor, simple_tensors);
+                    if (status != GGML_STATUS_SUCCESS) {
+                        return status;
                     }
                 }
             }
